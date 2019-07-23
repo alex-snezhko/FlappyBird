@@ -20,7 +20,7 @@ class Position:
 class AbstractGameObject(ABC):
     # updates game object's information after one game tick specified by parameter
     @abstractmethod
-    def game_tick(self, delta_t):
+    def update(self, delta_t):
         pass
 
     # redraws game object based on current positions
@@ -69,7 +69,7 @@ class Pipe(AbstractGameObject):
 
         self.image = both
 
-    def game_tick(self, delta_t):
+    def update(self, delta_t):
         # move pipe leftward
         delta_x = self.SPEED * delta_t
         self.center_pos.x += delta_x
@@ -109,7 +109,7 @@ class Bird(AbstractGameObject):
     def flap(self):
         self.y_vel += 0.8
 
-    def game_tick(self, delta_t):
+    def update(self, delta_t):
         self.pos.y += self.y_vel * delta_t + 0.5 * self.ACCELERATION * delta_t ** 2
         self.y_vel += self.ACCELERATION * delta_t
 
@@ -130,7 +130,9 @@ def init(screen_x, screen_y):
     global font
 
     pygame.init()
+
     screen = pygame.display.set_mode((screen_x, screen_y))
+    pygame.display.set_caption("Flappy Bird")
 
     BACK_COLOR = (255, 255, 255)
 
@@ -147,9 +149,14 @@ def init(screen_x, screen_y):
 
 # delta_t: time passed since last tick
 def tick(delta_t):
-    bird.game_tick(delta_t)
+    bird.update(delta_t)
     for pipe in pipes:
-        pipe.game_tick(delta_t)
+        pipe.update(delta_t)
+
+    # restarts game if bird collides with something
+    if check_collision():
+        init(screen.get_width(), screen.get_height())
+        return
 
     # removes pipe if it has left the game area
     # note: pipe at index 0 in list should be the one furthest to the left
@@ -196,6 +203,26 @@ def draw_objects():
     screen.blit(text_surface, (text_x, text_y))
 
     pygame.display.flip()
+
+
+# returns true if bird is involved in a collision
+def check_collision() -> bool:
+    # checks for collision with ground and ceiling
+    if bird.pos.y < bird.HEIGHT / 2 or bird.pos.y > (1 - bird.HEIGHT / 2):
+        return True
+
+    # checks for collisions with pipe
+    for pipe in pipes:
+        x_dist = abs(pipe.center_pos.x - bird.pos.x)
+        # only checks collision with pipes within collision distance
+        if x_dist <= bird.WIDTH / 2 + pipe.WIDTH / 2:
+            coll_top = bird.pos.y + bird.HEIGHT / 2 >= pipe.center_pos.y + pipe.OPENING / 2
+            coll_bot = bird.pos.y - bird.HEIGHT / 2 <= pipe.center_pos.y - pipe.OPENING / 2
+            # resets game if collision detected
+            if coll_top or coll_bot:
+                return True
+
+    return False
 
 
 def pipe_passed():
