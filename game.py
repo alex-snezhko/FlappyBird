@@ -2,11 +2,12 @@ import pygame
 import random
 from abc import ABC, abstractmethod
 from math import floor
+import solver
 
 
 # min and max heights that center of pipe openings are allowed to be at
 MIN_OPENING_HEIGHT = 0.2
-MAX_OPENING_HEIGHT = 0.8
+MAX_OPENING_HEIGHT = 1 - MIN_OPENING_HEIGHT
 
 # bird stays at x-position of 0.25 the entire game
 BIRD_X = 0.25
@@ -49,11 +50,16 @@ class AbstractGameObject(ABC):
 
 
 class Bird(AbstractGameObject):
+    # speed at which pipes move left towards bird (bird's x-position does not actually ever change)
+    FORWARD_VELOCITY = 0.2
     # downward acceleration (game units/second^2)
-    ACCELERATION = -1.7
+    GRAVITY_ACCEL = -1.7
+
     # bird width and height in game units
     WIDTH = 0.06
     HEIGHT = 0.05
+    # how much bird's velocity changes per flap
+    FLAP_DELTA_V = 0.8
 
     def __init__(self):
         self.pos = Position(BIRD_X, 0.5)
@@ -65,11 +71,11 @@ class Bird(AbstractGameObject):
         self.image = pygame.transform.scale(self.image, (width, height))
 
     def flap(self):
-        self.y_vel += 0.8
+        self.y_vel += self.FLAP_DELTA_V
 
     def update(self, delta_t):
-        self.pos.y += self.y_vel * delta_t + 0.5 * self.ACCELERATION * delta_t ** 2
-        self.y_vel += self.ACCELERATION * delta_t
+        self.pos.y += self.y_vel * delta_t + 0.5 * self.GRAVITY_ACCEL * delta_t ** 2
+        self.y_vel += self.GRAVITY_ACCEL * delta_t
 
     def draw(self, screen):
         # position of top-left point of image
@@ -79,9 +85,6 @@ class Bird(AbstractGameObject):
 
 
 class Pipe(AbstractGameObject):
-    # speed at which pipes move left towards bird; analagous to speed of bird (game units/second)
-    SPEED = -0.2
-
     # relevant pipe image dimensions (in game units)
     OPENING = 0.25  # size of opening between pair of pipes
     WIDTH = 0.125
@@ -115,7 +118,7 @@ class Pipe(AbstractGameObject):
 
     def update(self, delta_t):
         # move pipe leftward
-        delta_x = self.SPEED * delta_t
+        delta_x = -Bird.FORWARD_VELOCITY * delta_t
         self.center_pos.x += delta_x
 
     def draw(self, screen):
@@ -125,26 +128,6 @@ class Pipe(AbstractGameObject):
         screen.blit(self.image, tl_pixel)
 
 
-# returns true if bird is involved in a collision
-def detect_collision(bird, pipes) -> bool:
-    # checks for collision with ground and ceiling
-    if bird.pos.y < bird.HEIGHT / 2 or bird.pos.y > (1 - bird.HEIGHT / 2):
-        return True
-
-    # checks for collisions with pipe
-    for pipe in pipes:
-        x_dist = abs(pipe.center_pos.x - bird.pos.x)
-        # only checks collision with pipes within collision distance
-        if x_dist <= bird.WIDTH / 2 + pipe.WIDTH / 2:
-            coll_top = bird.pos.y + bird.HEIGHT / 2 >= pipe.center_pos.y + pipe.OPENING / 2
-            coll_bot = bird.pos.y - bird.HEIGHT / 2 <= pipe.center_pos.y - pipe.OPENING / 2
-            # resets game if collision detected
-            if coll_top or coll_bot:
-                return True
-
-    return False
-
-
 # main method that is called when game is run
 def main():
     pygame.init()
@@ -152,52 +135,150 @@ def main():
 
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
 
-    # initialize game objects
+    # --- set timer --- #
+
+    # timer has id of pygame.USEREVENT
+    tick = pygame.USEREVENT
+    tick_interval = 10
+    # tick time in seconds
+    delta_t = tick_interval / 1000
+    pygame.time.set_timer(tick, tick_interval)
+
+    # initializes/resets positions of game objects
+    def new_game(reset):
+        # creates new game objects if game is being restarted
+        if reset:
+            nonlocal bird
+            nonlocal pipes
+            nonlocal score
+
+            bird = Bird()
+            pipes = []
+            score = 0
+
+        # length across which center of pipe opening is allowed to span
+        pipe_y_range = MAX_OPENING_HEIGHT - MIN_OPENING_HEIGHT
+        opening_y = random.random() * pipe_y_range + MIN_OPENING_HEIGHT
+        pipes.append(Pipe(opening_y))
+
+        if auto_solve:
+            nonlocal flap_times_on_path
+            nonlocal time_on_path
+
+            flap_times_on_path = solver.new_path_flap_times(bird, bird.pos, pipes[0].center_pos)
+            time_on_path = 0
+
+    # switch between normal and auto-solve modes
+    def set_game_mode(auto_solve_mode):
+        nonlocal auto_solve
+        auto_solve = auto_solve_mode
+
+        new_game(reset=True)
+
+        # --- changes gamemode buttons --- #
+
+        selected_color = (170, 170, 170)
+        unselected_color = (230, 230, 230)
+
+        manual_button.fill(selected_color if not auto_solve else unselected_color)
+        solver_button.fill(selected_color if auto_solve else unselected_color)
+
+        normal_font = pygame.font.SysFont("Calibri", 12)
+        bold_font = pygame.font.SysFont("Calibri", 12, True)
+
+        manual_button_text_surface = (bold_font if not auto_solve else normal_font).render("Manual", False, (0, 0, 0))
+        manual_button_text_x = manual_button.get_width() / 2 - manual_button_text_surface.get_width() / 2
+        manual_button_text_y = manual_button.get_height() / 2 - manual_button_text_surface.get_height() / 2
+
+        solver_button_text_surface = (bold_font if auto_solve else normal_font).render("Auto-solve", False, (0, 0, 0))
+        solver_button_text_x = solver_button.get_width() / 2 - solver_button_text_surface.get_width() / 2
+        solver_button_text_y = solver_button.get_height() / 2 - solver_button_text_surface.get_height() / 2
+
+        manual_button.blit(manual_button_text_surface, (manual_button_text_x, manual_button_text_y))
+        solver_button.blit(solver_button_text_surface, (solver_button_text_x, solver_button_text_y))
+
+    # game mode buttons
+    manual_button = pygame.Surface((SCREEN_W // 8, SCREEN_H // 15))
+    solver_button = pygame.Surface((SCREEN_W // 8, SCREEN_H // 15))
+
     bird = Bird()
     pipes = []
-    # length across which center of pipe opening is allowed to span
-    pipe_y_range = MAX_OPENING_HEIGHT - MIN_OPENING_HEIGHT
-    opening_y = random.random() * pipe_y_range + MIN_OPENING_HEIGHT
-    pipes.append(Pipe(opening_y))
 
+    # how many pipes the bird has flown through
     score = 0
-    font = pygame.font.SysFont("Calibri", 40, True)
 
-    # timer with id pygame.USEREVENT will tick every 10 milliseconds
-    tick_id = pygame.USEREVENT
-    tick_interval = 10
-    pygame.time.set_timer(tick_id, tick_interval)
+    # whether or not automatic solver mode is activated
+    auto_solve = False
+    # list of times on path when the bird will flap (when auto-solve enabled)
+    flap_times_on_path = []
+    # time which the bird has spent on this path (when auto-solve enabled)
+    time_on_path = 0
+
+    new_game(reset=False)
+    set_game_mode(auto_solve_mode=False)
 
     # event loop
     running = True
     while running:
         # gets all events from the event queue
         for event in pygame.event.get():
-            if event.type == tick_id:
+            if event.type == tick:
+                # --- flaps bird on auto-solve mode if necessary --- #
+
+                if auto_solve:
+                    flaps_left = len(flap_times_on_path) > 0
+                    # first element in flap_times_on_path should be the earliest time
+                    if flaps_left and time_on_path >= flap_times_on_path[0]:
+                        bird.flap()
+                        # ensures that earliest flap time in list is at index 0 for next tick
+                        flap_times_on_path.remove(flap_times_on_path[0])
+
+                    time_on_path += delta_t
+
                 # --- recalculates positions of game objects --- #
 
-                # time that has passed in seconds since last tick
-                delta_t = tick_interval / 1000
-                bird.update(delta_t)
-                for pipe in pipes:
+                for index, pipe in enumerate(pipes):
                     was_right_of_bird = pipe.center_pos.x >= BIRD_X
                     pipe.update(delta_t)
                     now_left_of_bird = pipe.center_pos.x < BIRD_X
 
-                    # add to score if bird has passed this pipe
+                    # add to score and find new path if bird has passed this pipe
                     if was_right_of_bird and now_left_of_bird:
                         score += 1
 
+                        if auto_solve:
+                            # initial and final points for bird's new path
+                            p1 = pipe.center_pos
+                            p2 = pipes[index + 1].center_pos
+
+                            flap_times_on_path = solver.new_path_flap_times(bird, p1, p2)
+                            time_on_path = 0
+
+                bird.update(delta_t)
+
                 # --- restarts game if bird collides with something --- #
 
-                if detect_collision(bird, pipes):
-                    bird = Bird()
-                    pipes = []
-                    pipe_y_range = MAX_OPENING_HEIGHT - MIN_OPENING_HEIGHT
-                    opening_y = random.random() * pipe_y_range + MIN_OPENING_HEIGHT
-                    pipes.append(Pipe(opening_y))
+                # initially assumed to be no collision
+                collision = False
 
-                    score = 0
+                # checks for collision with ground and ceiling
+                if bird.pos.y < bird.HEIGHT / 2 or bird.pos.y > (1 - bird.HEIGHT / 2):
+                    collision = True
+                else:
+                    # checks for collisions with pipe
+                    for pipe in pipes:
+                        x_dist = abs(pipe.center_pos.x - bird.pos.x)
+                        # only checks collision with pipes within collision distance
+                        if x_dist <= bird.WIDTH / 2 + pipe.WIDTH / 2:
+                            coll_top = bird.pos.y + bird.HEIGHT / 2 >= pipe.center_pos.y + pipe.OPENING / 2
+                            coll_bot = bird.pos.y - bird.HEIGHT / 2 <= pipe.center_pos.y - pipe.OPENING / 2
+                            # resets game if collision detected
+                            if coll_top or coll_bot:
+                                collision = True
+                                break
+
+                if collision:
+                    new_game(reset=True)
                     break
 
                 # --- removes pipe if it has left the game area --- #
@@ -240,20 +321,44 @@ def main():
                     pipe.draw(screen)
                 bird.draw(screen)
 
-                # draws score number
-                text_surface = font.render(str(score), False, (0, 0, 0))
-                text_x = screen.get_width() / 2 - text_surface.get_width() / 2
-                text_y = screen.get_height() / 10
-                screen.blit(text_surface, (text_x, text_y))
+                # --- draws score number --- #
+
+                score_font = pygame.font.SysFont("Calibri", 40, True)
+                score_text_surface = score_font.render(str(score), False, (0, 0, 0))
+                score_text_x = screen.get_width() / 2 - score_text_surface.get_width() / 2
+                score_text_y = screen.get_height() / 10
+
+                screen.blit(score_text_surface, (score_text_x, score_text_y))
+
+                # --- draws gamemode buttons --- #
+
+                # solver button goes to top-right of screen, manual button touching solver button to the left
+                screen.blit(manual_button, (screen.get_width() - manual_button.get_width() * 2, 0))
+                screen.blit(solver_button, (screen.get_width() - solver_button.get_width(), 0))
 
                 pygame.display.flip()
 
             elif event.type == pygame.QUIT:
                 running = False
 
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE:
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+                if not auto_solve:
                     bird.flap()
+
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                # --- switches game mode if mouseclick on one of game mode buttons --- #
+
+                mouse_x, mouse_y = pygame.mouse.get_pos()
+
+                if mouse_y < manual_button.get_height():
+                    manual_button_left_x = screen.get_width() - manual_button.get_width() * 2
+                    solver_button_left_x = manual_button_left_x + manual_button.get_width()
+
+                    # switch game modes if mouse touching one of game mode buttons
+                    if auto_solve and manual_button_left_x <= mouse_x < solver_button_left_x:
+                        set_game_mode(auto_solve_mode=False)
+                    elif not auto_solve and mouse_x >= solver_button_left_x:
+                        set_game_mode(auto_solve_mode=True)
 
 
 if __name__ == "__main__":
