@@ -1,16 +1,12 @@
 import pygame
-import random
+from random import random
 from abc import ABC, abstractmethod
-from math import floor
-import solver
+import math
 
 
 # min and max heights that center of pipe openings are allowed to be at
 MIN_OPENING_HEIGHT = 0.2
 MAX_OPENING_HEIGHT = 1 - MIN_OPENING_HEIGHT
-
-# bird stays at x-position of 0.25 the entire game
-BIRD_X = 0.25
 
 BACK_COLOR = (255, 255, 255)
 
@@ -32,8 +28,8 @@ class Position:
 
     # converts position to appropriate location on screen
     def to_screen_location(self) -> (int, int):
-        screen_x = floor(self.x * SCREEN_W)
-        screen_y = floor((1.0 - self.y) * SCREEN_H)
+        screen_x = math.floor(self.x * SCREEN_W)
+        screen_y = math.floor((1.0 - self.y) * SCREEN_H)
         return screen_x, screen_y
 
 
@@ -51,7 +47,7 @@ class AbstractGameObject(ABC):
 
 class Bird(AbstractGameObject):
     # speed at which pipes move left towards bird (bird's x-position does not actually ever change)
-    FORWARD_VELOCITY = 0.2
+    X_VELOCITY = 0.2
     # downward acceleration (game units/second^2)
     GRAVITY_ACCEL = -1.7
 
@@ -62,12 +58,13 @@ class Bird(AbstractGameObject):
     FLAP_DELTA_V = 0.8
 
     def __init__(self):
-        self.pos = Position(BIRD_X, 0.5)
+        # bird stays at x-position of 0.25 the entire game
+        self.pos = Position(0.25, 0.5)
         self.y_vel = 0
         self.image = pygame.image.load("resources/bird.png")
 
-        width = floor(SCREEN_H / 10)
-        height = floor(SCREEN_H / 12)
+        width = math.floor(SCREEN_H / 10)
+        height = math.floor(SCREEN_H / 12)
         self.image = pygame.transform.scale(self.image, (width, height))
 
     def flap(self):
@@ -97,9 +94,9 @@ class Pipe(AbstractGameObject):
         self.center_pos = Position(1.0 + self.WIDTH - x_offset, center_height)
 
         img = pygame.image.load("resources/pipe.png")
-        width_pix = floor(self.WIDTH * SCREEN_W)
-        single_height_pix = floor(self.SINGLE_HEIGHT * SCREEN_H)
-        combined_height_pix = floor(self.HEIGHT * SCREEN_H)
+        width_pix = math.floor(self.WIDTH * SCREEN_W)
+        single_height_pix = math.floor(self.SINGLE_HEIGHT * SCREEN_H)
+        combined_height_pix = math.floor(self.HEIGHT * SCREEN_H)
 
         # bottom pipe (scaled to appropriate size)
         single_pipe_image = pygame.transform.scale(img, (width_pix, single_height_pix))
@@ -118,7 +115,7 @@ class Pipe(AbstractGameObject):
 
     def update(self, delta_t):
         # move pipe leftward
-        delta_x = -Bird.FORWARD_VELOCITY * delta_t
+        delta_x = -Bird.X_VELOCITY * delta_t
         self.center_pos.x += delta_x
 
     def draw(self, screen):
@@ -158,14 +155,14 @@ def main():
 
         # length across which center of pipe opening is allowed to span
         pipe_y_range = MAX_OPENING_HEIGHT - MIN_OPENING_HEIGHT
-        opening_y = random.random() * pipe_y_range + MIN_OPENING_HEIGHT
+        opening_y = random() * pipe_y_range + MIN_OPENING_HEIGHT
         pipes.append(Pipe(opening_y))
 
         if auto_solve:
             nonlocal flap_times_on_path
             nonlocal time_on_path
 
-            flap_times_on_path = solver.new_path_flap_times(bird, bird.pos, pipes[0].center_pos)
+            flap_times_on_path = new_path_flap_times(bird.pos, pipes[0].center_pos)
             time_on_path = 0
 
     # switch between normal and auto-solve modes
@@ -207,6 +204,11 @@ def main():
     # how many pipes the bird has flown through
     score = 0
 
+    # --- data relevent for the auto-solver --- #
+
+    # The auto-solver works on the principle of creating an imaginary line which traces the path the bird must follow,
+    #  and then forcing the bird to flap whenever it crosses that path to ensure it never falls below it
+
     # whether or not automatic solver mode is activated
     auto_solve = False
     # list of times on path when the bird will flap (when auto-solve enabled)
@@ -214,47 +216,104 @@ def main():
     # time which the bird has spent on this path (when auto-solve enabled)
     time_on_path = 0
 
+    # p1, p2: opening centers of pipes in question
+    def new_path_flap_times(p1, p2) -> [float]:
+        path_vector = p2 - p1
+
+        # time in seconds it will take to get to end of path vector
+        total_time = path_vector.x / Bird.X_VELOCITY
+
+        angle = math.atan2(path_vector.y, path_vector.x)
+        # ensures bird doesnt run into edge of pipe
+        remove_y = abs((Pipe.WIDTH / 2 + Bird.WIDTH / 2) * math.tan(angle))
+        # magnitude of offset for imaginary line on which bird must flap
+        y_offset = (Pipe.OPENING / 2 - Bird.HEIGHT / 2 - remove_y - 0.01) / 2
+
+        # times on which the bird must flap to complete its path
+        flap_times = []
+
+        # variables used for calculation
+        y_pos = bird.pos.y
+        y_vel = bird.y_vel
+        slope = path_vector.y / path_vector.x
+        t_path = 0  # time passed along path vector
+        while True:
+            # --- find times at which bird crosses imaginary flap line --- #
+
+            # equations used:
+            # p2y = p1y + vy * dt + 0.5 * g * dt^2
+            # p2y = (c1y - y_offset) + slope * vx * (t_path + dt)
+            #
+            # p1, p2: initial position of bird and then final position at which it must flap
+            # vx, vy: bird's x and y velocities
+            # dt: time that must pass before bird must flap (since the last time it has flapped)
+            # c1: center of the first pipe
+
+            # quadratic formula inputs
+            a = 0.5 * Bird.GRAVITY_ACCEL
+            b = y_vel - slope * Bird.X_VELOCITY
+            c = y_pos - (p1.y - y_offset) - Bird.X_VELOCITY * slope * t_path
+
+            sqrt_discriminant = math.sqrt(b ** 2 - 4 * a * c)
+            plus = (-b + sqrt_discriminant) / (2 * a)
+            minus = (-b - sqrt_discriminant) / (2 * a)
+            dt = max(plus, minus)
+
+            t_path = t_path + dt
+
+            # break out of loop if the current time on the path has exceeded the total time spent on the path
+            if t_path > total_time:
+                break
+
+            # update variables to be correct for next calculation
+            y_pos += y_vel * dt + 0.5 * Bird.GRAVITY_ACCEL * dt ** 2 + 0.00001
+            y_vel += Bird.GRAVITY_ACCEL * dt + Bird.FLAP_DELTA_V
+
+            flap_times.append(t_path)
+
+        return flap_times
+
     new_game(reset=False)
     set_game_mode(auto_solve_mode=False)
 
     # event loop
     running = True
     while running:
-        # gets all events from the event queue
+        # iterates through all events in the event queue
         for event in pygame.event.get():
             if event.type == tick:
-                # --- flaps bird on auto-solve mode if necessary --- #
-
-                if auto_solve:
-                    flaps_left = len(flap_times_on_path) > 0
-                    # first element in flap_times_on_path should be the earliest time
-                    if flaps_left and time_on_path >= flap_times_on_path[0]:
-                        bird.flap()
-                        # ensures that earliest flap time in list is at index 0 for next tick
-                        flap_times_on_path.remove(flap_times_on_path[0])
-
-                    time_on_path += delta_t
-
                 # --- recalculates positions of game objects --- #
 
-                for index, pipe in enumerate(pipes):
-                    was_right_of_bird = pipe.center_pos.x >= BIRD_X
-                    pipe.update(delta_t)
-                    now_left_of_bird = pipe.center_pos.x < BIRD_X
+                # flaps bird on auto-solve mode if needed
+                if auto_solve and len(flap_times_on_path) > 0 and time_on_path + delta_t >= flap_times_on_path[0]:
+                    # --- accurately calculates single-frame game object movement if there is a flap required --- #
 
-                    # add to score and find new path if bird has passed this pipe
-                    if was_right_of_bird and now_left_of_bird:
-                        score += 1
+                    # time since last tick at which bird must flap
+                    t_since_last_tick = flap_times_on_path[0] - time_on_path
+                    # time remaining in the frame after the bird has flapped
+                    t_remaining = delta_t - t_since_last_tick
 
-                        if auto_solve:
-                            # initial and final points for bird's new path
-                            p1 = pipe.center_pos
-                            p2 = pipes[index + 1].center_pos
+                    # updates game objects to time right before the bird must flap
+                    bird.update(t_since_last_tick)
+                    for pipe in pipes:
+                        pipe.update(t_since_last_tick)
 
-                            flap_times_on_path = solver.new_path_flap_times(bird, p1, p2)
-                            time_on_path = 0
+                    bird.flap()
 
-                bird.update(delta_t)
+                    # updates game objects to positions at the end of the frame
+                    bird.update(t_remaining)
+                    for pipe in pipes:
+                        pipe.update(t_remaining)
+
+                    # ensures that earliest flap time in list is at index 0 for next tick
+                    flap_times_on_path.remove(flap_times_on_path[0])
+                else:
+                    # updates game object positions under normal circumstances
+                    bird.update(delta_t)
+                    for pipe in pipes:
+                        pipe.update(delta_t)
+
+                time_on_path += delta_t if auto_solve else 0
 
                 # --- restarts game if bird collides with something --- #
 
@@ -301,7 +360,7 @@ def main():
                     max_diff = 0.2
 
                     # select random number from (-max_diff to max_diff) for new y position
-                    delta_y = (random.random() - 0.5) * max_diff * 2
+                    delta_y = (random() - 0.5) * max_diff * 2
                     # add favoritism to a higher new y if opening_height is close to MIN_OPENING_HEIGHT and vice versa
                     # (to prevent several pipes in a row from being very low or very high)
                     if opening_height < MIN_OPENING_HEIGHT + max_diff:
@@ -312,6 +371,24 @@ def main():
                     new_opening_height = opening_height + delta_y
                     # add new pipe to pipes with appropriate x-offset to keep pipes exactly 0.4 units away
                     pipes.append(Pipe(new_opening_height, min_allowed_x - closest_x))
+
+                # --- checks if bird has gone through a pipe during the course of this frame --- #
+
+                for index, pipe in enumerate(pipes):
+                    # pipe's x position as it was at the beginning of the frame
+                    init_x_pos = pipe.center_pos.x + bird.X_VELOCITY * delta_t
+
+                    # add to score and find new path if bird has passed this pipe
+                    if init_x_pos >= bird.pos.x > pipe.center_pos.x:
+                        score += 1
+
+                        if auto_solve:
+                            # initial and final points for bird's new path
+                            pi = pipe.center_pos
+                            pf = pipes[index + 1].center_pos
+
+                            flap_times_on_path = new_path_flap_times(pi, pf)
+                            time_on_path = 0
 
                 # --- redraws game objects to their new positions --- #
 
