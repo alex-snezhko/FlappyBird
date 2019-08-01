@@ -52,8 +52,8 @@ class Bird(AbstractGameObject):
     GRAVITY_ACCEL = -1.7
 
     # bird width and height in game units
-    WIDTH = 0.06
-    HEIGHT = 0.05
+    WIDTH = 0.1
+    HEIGHT = 0.09
     # how much bird's velocity changes per flap
     FLAP_DELTA_V = 0.8
 
@@ -63,8 +63,8 @@ class Bird(AbstractGameObject):
         self.y_vel = 0
         self.image = pygame.image.load("resources/bird.png")
 
-        width = math.floor(SCREEN_H / 10)
-        height = math.floor(SCREEN_H / 12)
+        width = math.floor(self.WIDTH * SCREEN_W)
+        height = math.floor(self.HEIGHT * SCREEN_H)
         self.image = pygame.transform.scale(self.image, (width, height))
 
     def flap(self):
@@ -218,29 +218,60 @@ def main():
 
     # p1, p2: opening centers of pipes in question
     def new_path_flap_times(p1, p2) -> [float]:
-        path_vector = p2 - p1
+        total_time = (p2 - p1).x / Bird.X_VELOCITY
 
-        # time in seconds it will take to get to end of path vector
-        total_time = path_vector.x / Bird.X_VELOCITY
+        # how far below pipe opening bird will maintain height during flat portions
+        y_offset = (Pipe.OPENING / 2 - Bird.HEIGHT / 2) / 2
+        # how far out beyond pipe openings flat portions extend
+        flat_radius = Pipe.WIDTH / 2 + Bird.WIDTH / 2 + 0.01
+        # time spent on each of the flat portions
+        t_on_flat = flat_radius / Bird.X_VELOCITY
+        # diagonal portion of path between the horizontal portions
+        diag_vector = (p2 - Position(flat_radius, 0)) - (p1 + Position(flat_radius, 0))
+        diag_slope = diag_vector.y / diag_vector.x
 
-        angle = math.atan2(path_vector.y, path_vector.x)
-        # ensures bird doesnt run into edge of pipe
-        remove_y = abs((Pipe.WIDTH / 2 + Bird.WIDTH / 2) * math.tan(angle))
-        # magnitude of offset for imaginary line on which bird must flap
-        y_offset = (Pipe.OPENING / 2 - Bird.HEIGHT / 2 - remove_y - 0.01) / 2
+        # tries to ensure that bird does not double jump, causing collision with top pipe
+        #max_y_offset = Pipe.OPENING / 2 - Bird.HEIGHT / 2 - 0.01
 
-        # times on which the bird must flap to complete its path
+        # list of times when bird must flap
         flap_times = []
 
         # variables used for calculation
         y_pos = bird.pos.y
         y_vel = bird.y_vel
-        slope = path_vector.y / path_vector.x
         t_path = 0  # time passed along path vector
-        while True:
-            # --- find times at which bird crosses imaginary flap line --- #
 
-            # equations used:
+        def freefall(t):
+            nonlocal t_path
+            nonlocal y_pos
+            nonlocal y_vel
+
+            t_path += t
+            y_pos += y_vel * t + 0.5 * Bird.GRAVITY_ACCEL * t ** 2 + 0.00001
+            y_vel += Bird.GRAVITY_ACCEL * t
+
+        def calculate_dt() -> float:
+            # adjusted y offset
+            y_off = y_offset + curr_slope * flat_radius
+
+            # quadratic formula inputs
+            a = 0.5 * Bird.GRAVITY_ACCEL
+            b = y_vel - curr_slope * Bird.X_VELOCITY
+            c = y_pos - ((p1.y if curr_step != 2 else p2.y) - y_off) - Bird.X_VELOCITY * curr_slope * t_path
+
+            sqrt_discriminant = math.sqrt(b ** 2 - 4 * a * c)
+            plus = (-b + sqrt_discriminant) / (2 * a)
+            minus = (-b - sqrt_discriminant) / (2 * a)
+
+            return max(plus, minus)
+
+        # current step in path (0: first horizontal, 1: diagonal, 2: second horizontal)
+        curr_step = 0
+        curr_slope = 0
+        # times after which the current step is finished
+        step_times = (t_on_flat, total_time - t_on_flat, total_time)
+        while True:
+            # basic equations used:
             # p2y = p1y + vy * dt + 0.5 * g * dt^2
             # p2y = (c1y - y_offset) + slope * vx * (t_path + dt)
             #
@@ -249,27 +280,33 @@ def main():
             # dt: time that must pass before bird must flap (since the last time it has flapped)
             # c1: center of the first pipe
 
-            # quadratic formula inputs
-            a = 0.5 * Bird.GRAVITY_ACCEL
-            b = y_vel - slope * Bird.X_VELOCITY
-            c = y_pos - (p1.y - y_offset) - Bird.X_VELOCITY * slope * t_path
+            dt = calculate_dt()
 
-            sqrt_discriminant = math.sqrt(b ** 2 - 4 * a * c)
-            plus = (-b + sqrt_discriminant) / (2 * a)
-            minus = (-b - sqrt_discriminant) / (2 * a)
-            dt = max(plus, minus)
+            # switches to next step if needed
+            if t_path + dt > step_times[curr_step]:
+                # brings bird to point at which steps change
+                t_to_next_step = step_times[curr_step] - t_path
 
-            t_path = t_path + dt
+                curr_step += 1
+                if curr_step == 3:
+                    break
 
-            # break out of loop if the current time on the path has exceeded the total time spent on the path
-            if t_path > total_time:
-                break
+                curr_slope = diag_slope if curr_step == 1 else 0
 
-            # update variables to be correct for next calculation
-            y_pos += y_vel * dt + 0.5 * Bird.GRAVITY_ACCEL * dt ** 2 + 0.00001
-            y_vel += Bird.GRAVITY_ACCEL * dt + Bird.FLAP_DELTA_V
+                freefall(t_to_next_step)
+
+                dt = calculate_dt()
+
+            freefall(dt)
+            y_vel += Bird.FLAP_DELTA_V
+
+            # tries to prevent rapid double-flapping that causes the bird to hit the top pipe
+            #if curr_step != 1 and y_vel < 0.2:
+            #    freefall(-0.1)
 
             flap_times.append(t_path)
+
+
 
         return flap_times
 
@@ -282,38 +319,85 @@ def main():
         # iterates through all events in the event queue
         for event in pygame.event.get():
             if event.type == tick:
-                # --- recalculates positions of game objects --- #
+                if auto_solve:
+                    # --- calculates proper path through the frame if the bird must flap and/or passes a pipe --- #
 
-                # flaps bird on auto-solve mode if needed
-                if auto_solve and len(flap_times_on_path) > 0 and time_on_path + delta_t >= flap_times_on_path[0]:
-                    # --- accurately calculates single-frame game object movement if there is a flap required --- #
+                    # time during this frame at which bird must flap (inf if no flap this frame)
+                    t_to_flap = math.inf
+                    if len(flap_times_on_path) > 0 and time_on_path + delta_t >= flap_times_on_path[0]:
+                        t_to_flap = flap_times_on_path[0] - time_on_path
 
-                    # time since last tick at which bird must flap
-                    t_since_last_tick = flap_times_on_path[0] - time_on_path
-                    # time remaining in the frame after the bird has flapped
-                    t_remaining = delta_t - t_since_last_tick
+                    # time during this frame at which bird passes pipe (inf if no pipe passed this frame)
+                    t_to_pipe = math.inf
+                    pipe_index = -1
+                    for index, pipe in enumerate(pipes):
+                        time = (pipe.center_pos.x - bird.pos.x) / Bird.X_VELOCITY
+                        this_frame = 0 < time < delta_t
+                        if time < t_to_pipe and this_frame:
+                            t_to_pipe = time
+                            pipe_index = index
 
-                    # updates game objects to time right before the bird must flap
-                    bird.update(t_since_last_tick)
+                    # event for if a flap is required
+                    def flap():
+                        bird.flap()
+                        flap_times_on_path.pop(0)
+
+                    # event for if bird passes a pipe
+                    def pass_pipe():
+                        nonlocal score
+                        score += 1
+
+                        # initial and final points for bird's new path
+                        pi = pipes[pipe_index].center_pos
+                        pf = pipes[pipe_index + 1].center_pos
+
+                        nonlocal flap_times_on_path
+                        flap_times_on_path = new_path_flap_times(pi, pf)
+
+                        nonlocal time_on_path
+                        time_on_path = 0
+
+                    # list of events to perform; each element consists of a tuple: [0] = event, [1] = time event occurs
+                    event_list = []
+                    if math.isfinite(t_to_flap):
+                        event_list.append((flap, t_to_flap))
+                    if math.isfinite(t_to_pipe):
+                        event_list.append((pass_pipe, t_to_pipe))
+
+                    # performs all events needed
+                    t_frame = 0
+                    for e in event_list:
+                        time = e[1] - t_frame
+                        bird.update(time)
+                        for pipe in pipes:
+                            pipe.update(time)
+
+                        # performs required event
+                        e[0]()
+
+                        # updates to time right after the event
+                        t_frame += time
+
+                    # completes updating game objects after all events have been incurred
+                    bird.update(delta_t - t_frame)
                     for pipe in pipes:
-                        pipe.update(t_since_last_tick)
+                        pipe.update(delta_t - t_frame)
 
-                    bird.flap()
-
-                    # updates game objects to positions at the end of the frame
-                    bird.update(t_remaining)
-                    for pipe in pipes:
-                        pipe.update(t_remaining)
-
-                    # ensures that earliest flap time in list is at index 0 for next tick
-                    flap_times_on_path.remove(flap_times_on_path[0])
+                    time_on_path += delta_t
                 else:
-                    # updates game object positions under normal circumstances
+                    # updates game object positions
                     bird.update(delta_t)
                     for pipe in pipes:
                         pipe.update(delta_t)
 
-                time_on_path += delta_t if auto_solve else 0
+                    # checks if bird has passed a pipe
+                    for pipe in pipes:
+                        # pipe's x position as it was at the beginning of the frame
+                        init_x_pos = pipe.center_pos.x + bird.X_VELOCITY * delta_t
+
+                        # add to score and find new path if bird has passed this pipe
+                        if init_x_pos >= bird.pos.x > pipe.center_pos.x:
+                            score += 1
 
                 # --- restarts game if bird collides with something --- #
 
@@ -371,24 +455,6 @@ def main():
                     new_opening_height = opening_height + delta_y
                     # add new pipe to pipes with appropriate x-offset to keep pipes exactly 0.4 units away
                     pipes.append(Pipe(new_opening_height, min_allowed_x - closest_x))
-
-                # --- checks if bird has gone through a pipe during the course of this frame --- #
-
-                for index, pipe in enumerate(pipes):
-                    # pipe's x position as it was at the beginning of the frame
-                    init_x_pos = pipe.center_pos.x + bird.X_VELOCITY * delta_t
-
-                    # add to score and find new path if bird has passed this pipe
-                    if init_x_pos >= bird.pos.x > pipe.center_pos.x:
-                        score += 1
-
-                        if auto_solve:
-                            # initial and final points for bird's new path
-                            pi = pipe.center_pos
-                            pf = pipes[index + 1].center_pos
-
-                            flap_times_on_path = new_path_flap_times(pi, pf)
-                            time_on_path = 0
 
                 # --- redraws game objects to their new positions --- #
 
