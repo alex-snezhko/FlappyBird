@@ -125,6 +125,17 @@ class Pipe(AbstractGameObject):
         screen.blit(self.image, tl_pixel)
 
 
+# performs quadratic formula (assuming there is at least 1 real root)
+def quadratic_formula(a, b, c) -> (float, float):
+    discriminant = b**2 - 4 * a * c
+    if abs(discriminant) < 0.00001:
+        discriminant = 0
+    plus = (-b + math.sqrt(discriminant)) / (2 * a)
+    minus = (-b - math.sqrt(discriminant)) / (2 * a)
+
+    return plus, minus
+
+
 # main method that is called when game is run
 def main():
     pygame.init()
@@ -159,10 +170,10 @@ def main():
         pipes.append(Pipe(opening_y))
 
         if auto_solve:
-            nonlocal flap_times_on_path
+            nonlocal path_data
             nonlocal time_on_path
 
-            flap_times_on_path = new_path_flap_times(bird.pos, pipes[0].center_pos)
+            path_data = new_path_flap_times(bird.pos, pipes[0].center_pos)
             time_on_path = 0
 
     # switch between normal and auto-solve modes
@@ -212,26 +223,33 @@ def main():
     # whether or not automatic solver mode is activated
     auto_solve = False
     # list of times on path when the bird will flap (when auto-solve enabled)
-    flap_times_on_path = []
+    path_data = (False, [])
     # time which the bird has spent on this path (when auto-solve enabled)
     time_on_path = 0
 
     # p1, p2: opening centers of pipes in question
-    def new_path_flap_times(p1, p2) -> [float]:
+    # prev_lowered: whether or not the previous path had to be lowered to avoid collision
+    def new_path_flap_times(p1, p2) -> (bool, [float]):
         total_time = (p2 - p1).x / Bird.X_VELOCITY
+        prev_lowered = path_data[0]
 
         # how far below pipe opening bird will maintain height during flat portions
-        y_offset = (Pipe.OPENING / 2 - Bird.HEIGHT / 2) / 2
+        normal_y_offset = (Pipe.OPENING / 2 - Bird.HEIGHT / 2) / 2
+        # lowest the bird is allowed to go; tries to ensure that bird does not double jump and collide with top pipe
+        # bird will descend down to this distance if maintaining normal_y_offset height will cause collision
+        lowered_y_offset = Pipe.OPENING / 2 - Bird.HEIGHT / 2 - 0.01
+
         # how far out beyond pipe openings flat portions extend
         flat_radius = Pipe.WIDTH / 2 + Bird.WIDTH / 2 + 0.01
         # time spent on each of the flat portions
         t_on_flat = flat_radius / Bird.X_VELOCITY
-        # diagonal portion of path between the horizontal portions
-        diag_vector = (p2 - Position(flat_radius, 0)) - (p1 + Position(flat_radius, 0))
-        diag_slope = diag_vector.y / diag_vector.x
 
-        # tries to ensure that bird does not double jump, causing collision with top pipe
-        #max_y_offset = Pipe.OPENING / 2 - Bird.HEIGHT / 2 - 0.01
+        # vector representing diagonal portion of path between the horizontal portions
+        diag_vector = (p2 - Position(flat_radius, 0)) - (p1 + Position(flat_radius, 0))
+        # corrects diagonal vector if the previous path was lowered, to ensure new diagonal ends at unlowered y
+        if prev_lowered:
+            diag_vector.y += lowered_y_offset - normal_y_offset
+        diag_slope = diag_vector.y / diag_vector.x
 
         # list of times when bird must flap
         flap_times = []
@@ -250,27 +268,7 @@ def main():
             y_pos += y_vel * t + 0.5 * Bird.GRAVITY_ACCEL * t ** 2 + 0.00001
             y_vel += Bird.GRAVITY_ACCEL * t
 
-        def calculate_dt() -> float:
-            # adjusted y offset
-            y_off = y_offset + curr_slope * flat_radius
-
-            # quadratic formula inputs
-            a = 0.5 * Bird.GRAVITY_ACCEL
-            b = y_vel - curr_slope * Bird.X_VELOCITY
-            c = y_pos - ((p1.y if curr_step != 2 else p2.y) - y_off) - Bird.X_VELOCITY * curr_slope * t_path
-
-            sqrt_discriminant = math.sqrt(b ** 2 - 4 * a * c)
-            plus = (-b + sqrt_discriminant) / (2 * a)
-            minus = (-b - sqrt_discriminant) / (2 * a)
-
-            return max(plus, minus)
-
-        # current step in path (0: first horizontal, 1: diagonal, 2: second horizontal)
-        curr_step = 0
-        curr_slope = 0
-        # times after which the current step is finished
-        step_times = (t_on_flat, total_time - t_on_flat, total_time)
-        while True:
+        def time_to_next_flap() -> float:
             # basic equations used:
             # p2y = p1y + vy * dt + 0.5 * g * dt^2
             # p2y = (c1y - y_offset) + slope * vx * (t_path + dt)
@@ -280,7 +278,38 @@ def main():
             # dt: time that must pass before bird must flap (since the last time it has flapped)
             # c1: center of the first pipe
 
-            dt = calculate_dt()
+            y_offset = lowered_y_offset if lower_offset else normal_y_offset
+
+            if curr_step == 0:
+                curr_slope = 0
+                if prev_lowered:
+                    y_offset = lowered_y_offset
+                c = y_pos - (p1.y - y_offset)
+            elif curr_step == 1:
+                curr_slope = diag_slope
+                if prev_lowered:
+                    y_offset = lowered_y_offset
+                # y offset is used as a y-intercept for diagonals
+                y_offset += curr_slope * flat_radius
+                c = y_pos - (p1.y - y_offset) - Bird.X_VELOCITY * curr_slope * t_path
+            else:
+                curr_slope = 0
+                c = y_pos - (p2.y - y_offset)
+
+            t = quadratic_formula(a=0.5 * Bird.GRAVITY_ACCEL, b=y_vel - curr_slope * Bird.X_VELOCITY, c=c)[1]
+            return t
+
+        # current step in path (0: first horizontal; ends right after the bird clears the first pipe, 1: diagonal,
+        #  2: second horizontal; begins right as bird enters close vicinity of end pipe)
+        curr_step = 0
+        # times after which the current step is finished
+        step_times = (t_on_flat, total_time - t_on_flat, total_time)
+        # whether or not the flap line had to be lowered in order for bird not to collide with pipe
+        lower_offset = False
+
+        while True:
+            # finds time until next flap (when bird hits flap line again)
+            dt = time_to_next_flap()
 
             # switches to next step if needed
             if t_path + dt > step_times[curr_step]:
@@ -291,24 +320,52 @@ def main():
                 if curr_step == 3:
                     break
 
-                curr_slope = diag_slope if curr_step == 1 else 0
-
                 freefall(t_to_next_step)
 
-                dt = calculate_dt()
+                dt = time_to_next_flap()
 
+            # updates to time of new flap
             freefall(dt)
-            y_vel += Bird.FLAP_DELTA_V
 
-            # tries to prevent rapid double-flapping that causes the bird to hit the top pipe
-            #if curr_step != 1 and y_vel < 0.2:
-            #    freefall(-0.1)
+            y_vel_after_flap = y_vel + Bird.FLAP_DELTA_V
+
+            # --- uses lowered flap line if bird will collide with pipe using calculated flap time --- #
+
+            # maximum y_position the bird will reach if it were to flap at calculated
+            max_height = y_pos - (y_vel_after_flap**2) / (2 * Bird.GRAVITY_ACCEL)
+            # whether or not the bird flies high enough to touch pipe on the y axis
+            touches_pipe_on_y = max_height + Bird.HEIGHT / 2 > (p1.y if curr_step == 0 else p2.y) + Pipe.OPENING / 2
+            if touches_pipe_on_y:
+                # special case for diagonal portion
+                if curr_step == 1:
+                    # --- checks if bird touches end pipe on the x-axis (expressed in terms of time on path here) --- #
+
+                    # minimum time on path required for bird to be touching end pipe on the x axis
+                    touching_pipe_min_t = total_time - (Pipe.WIDTH / 2 + Bird.WIDTH / 2) / Bird.X_VELOCITY
+
+                    # time at which bird exits the end pipe on the y-axis
+                    t_exiting_pipe_y = t_path + quadratic_formula(
+                        a=0.5 * Bird.GRAVITY_ACCEL,
+                        b=y_vel_after_flap,
+                        c=-(p2.y + Pipe.OPENING / 2 - Bird.HEIGHT / 2 - y_pos))[1]
+
+                    actually_touches_pipe = t_exiting_pipe_y > touching_pipe_min_t
+
+                # if not on the diagonal step, then touching on the y axis means touching pipe due to nature of steps
+                else:
+                    actually_touches_pipe = True
+
+                # lower y offset and recalculate dt if bird will collide with pipe on current path
+                if actually_touches_pipe:
+                    lower_offset = True
+                    freefall(-dt)
+                    dt = time_to_next_flap()
+                    freefall(dt)
 
             flap_times.append(t_path)
+            y_vel = y_vel_after_flap
 
-
-
-        return flap_times
+        return lower_offset, flap_times
 
     new_game(reset=False)
     set_game_mode(auto_solve_mode=False)
@@ -322,20 +379,17 @@ def main():
                 if auto_solve:
                     # --- calculates proper path through the frame if the bird must flap and/or passes a pipe --- #
 
-                    # time during this frame at which bird must flap (inf if no flap this frame)
-                    t_to_flap = math.inf
-                    if len(flap_times_on_path) > 0 and time_on_path + delta_t >= flap_times_on_path[0]:
-                        t_to_flap = flap_times_on_path[0] - time_on_path
+                    flap_times_on_path = path_data[1]
+                    # time during this frame at which bird must flap (>= delta_t if no flap this frame)
+                    t_to_flap = flap_times_on_path[0] - time_on_path if len(flap_times_on_path) > 0 else delta_t
 
-                    # time during this frame at which bird passes pipe (inf if no pipe passed this frame)
-                    t_to_pipe = math.inf
-                    pipe_index = -1
-                    for index, pipe in enumerate(pipes):
-                        time = (pipe.center_pos.x - bird.pos.x) / Bird.X_VELOCITY
-                        this_frame = 0 < time < delta_t
-                        if time < t_to_pipe and this_frame:
-                            t_to_pipe = time
-                            pipe_index = index
+                    # time during this frame at which bird passes pipe (>= delta_t if no pipe passed this frame)
+                    t_to_pipe = (pipes[0].center_pos.x - bird.pos.x) / Bird.X_VELOCITY
+                    pipe_index = 0
+                    # closest pipe can only be pipes[0] or pipes[1] (since newly created pipes appended to end of list)
+                    if t_to_pipe < 0:
+                        t_to_pipe = (pipes[1].center_pos.x - bird.pos.x) / Bird.X_VELOCITY
+                        pipe_index = 1
 
                     # event for if a flap is required
                     def flap():
@@ -351,17 +405,16 @@ def main():
                         pi = pipes[pipe_index].center_pos
                         pf = pipes[pipe_index + 1].center_pos
 
-                        nonlocal flap_times_on_path
-                        flap_times_on_path = new_path_flap_times(pi, pf)
-
+                        nonlocal path_data
+                        path_data = new_path_flap_times(pi, pf)
                         nonlocal time_on_path
                         time_on_path = 0
 
                     # list of events to perform; each element consists of a tuple: [0] = event, [1] = time event occurs
                     event_list = []
-                    if math.isfinite(t_to_flap):
+                    if t_to_flap < delta_t:
                         event_list.append((flap, t_to_flap))
-                    if math.isfinite(t_to_pipe):
+                    if t_to_pipe < delta_t:
                         event_list.append((pass_pipe, t_to_pipe))
 
                     # performs all events needed
@@ -372,6 +425,8 @@ def main():
                         for pipe in pipes:
                             pipe.update(time)
 
+                        time_on_path += time
+
                         # performs required event
                         e[0]()
 
@@ -379,11 +434,12 @@ def main():
                         t_frame += time
 
                     # completes updating game objects after all events have been incurred
-                    bird.update(delta_t - t_frame)
+                    t_to_end_frame = delta_t - t_frame
+                    bird.update(t_to_end_frame)
                     for pipe in pipes:
-                        pipe.update(delta_t - t_frame)
+                        pipe.update(t_to_end_frame)
 
-                    time_on_path += delta_t
+                    time_on_path += t_to_end_frame
                 else:
                     # updates game object positions
                     bird.update(delta_t)
@@ -405,16 +461,16 @@ def main():
                 collision = False
 
                 # checks for collision with ground and ceiling
-                if bird.pos.y < bird.HEIGHT / 2 or bird.pos.y > (1 - bird.HEIGHT / 2):
+                if bird.pos.y < Bird.HEIGHT / 2 or bird.pos.y > (1 - Bird.HEIGHT / 2):
                     collision = True
                 else:
                     # checks for collisions with pipe
                     for pipe in pipes:
                         x_dist = abs(pipe.center_pos.x - bird.pos.x)
                         # only checks collision with pipes within collision distance
-                        if x_dist <= bird.WIDTH / 2 + pipe.WIDTH / 2:
-                            coll_top = bird.pos.y + bird.HEIGHT / 2 >= pipe.center_pos.y + pipe.OPENING / 2
-                            coll_bot = bird.pos.y - bird.HEIGHT / 2 <= pipe.center_pos.y - pipe.OPENING / 2
+                        if x_dist <= Bird.WIDTH / 2 + Pipe.WIDTH / 2:
+                            coll_top = bird.pos.y + Bird.HEIGHT / 2 >= pipe.center_pos.y + Pipe.OPENING / 2
+                            coll_bot = bird.pos.y - Bird.HEIGHT / 2 <= pipe.center_pos.y - Pipe.OPENING / 2
                             # resets game if collision detected
                             if coll_top or coll_bot:
                                 collision = True
